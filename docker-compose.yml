@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  db:
+    image: neo4j:5.11
+    container_name: neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/testpassword
+      - NEO4J_dbms_memory_heap_max__size=4G
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - mynetwork
+
+  app:
+    image: myapp:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - NEO4J_URI=bolt://neo4j:7687
+    volumes:
+      - ./app:/usr/src/app
+    networks:
+      - mynetwork
+    depends_on:
+      - db
+
+networks:
+  mynetwork:
+
+volumes:
+  neo4j_data:
