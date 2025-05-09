@@ -33,7 +33,7 @@ services:
       - db
 
 networks:
-  mynetwork:
+  mynetwork: 
 
 volumes:
   neo4j_data:
