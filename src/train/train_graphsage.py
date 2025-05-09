@@ -11,6 +11,7 @@ import itertools
 import numpy as np
 from neo4j import GraphDatabase
 import uuid
+import json
 
 # Set random seed
 torch.manual_seed(42)
@@ -44,6 +45,10 @@ class Neo4jConnection:
             "unix_time_mean: $unix_time_mean, time_span: $time_span, ip_trans_freq: $ip_trans_freq, "
             "ip_address: $ip_address})"
         )
+        # Ensure trans_count is an integer and non-negative
+        features['trans_count'] = int(max(features['trans_count'], 0))
+        # Ensure ip_address is a string
+        features['ip_address'] = str(features['ip_address'])
         tx.run(query, **features)
 
     def create_edge(self, tx, src_idx, dst_idx, edge_type):
@@ -83,7 +88,8 @@ ip_trans_freq = ip_trans_freq.groupby("acc_num")["trans_num"].sum().reset_index(
 ip_trans_freq.columns = ["acc_num", "ip_trans_freq"]
 
 agg_features = data_df.groupby("acc_num").agg({
-    "amt": ["mean", "std", "count"],
+    "amt": ["mean", "std"],
+    "trans_num": "count",  # Use trans_num for count to ensure integer
     "state": lambda x: x.mode().iloc[0] if not x.mode().empty else "Unknown",
     "zip": "first",
     "city_pop": "mean",
@@ -104,18 +110,24 @@ agg_features["ip_trans_freq"] = agg_features["ip_trans_freq"].fillna(0)
 # Fill NaN in amt_std
 agg_features["amt_std"] = agg_features["amt_std"].fillna(0)
 
-# Encode categorical columns
-agg_features["state"] = agg_features["state"].astype("category").cat.codes
-agg_features["ip_address"] = agg_features["ip_address"].astype("category").cat.codes
+# Create a column for encoded ip_address for model input
+agg_features["ip_address_encoded"] = agg_features["ip_address"].astype("category").cat.codes
 
-# Normalize numerical features
+# Encode state column
+agg_features["state"] = agg_features["state"].astype("category").cat.codes
+
+# Normalize numerical features (exclude trans_count to keep it integer)
 scaler = StandardScaler()
-numerical_cols = ["amt_mean", "amt_std", "trans_count", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq"]
+numerical_cols = ["amt_mean", "amt_std", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq"]
 agg_features[numerical_cols] = scaler.fit_transform(agg_features[numerical_cols])
 
-# Node feature matrix
+# Ensure trans_count is integer and non-negative
+agg_features["trans_count"] = agg_features["trans_count"].astype(int)
+agg_features["trans_count"] = agg_features["trans_count"].clip(lower=0)
+
+# Node feature matrix (use encoded ip_address)
 x = torch.tensor(
-    agg_features[["amt_mean", "amt_std", "trans_count", "state", "zip", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq", "ip_address"]].values,
+    agg_features[["amt_mean", "amt_std", "trans_count", "state", "zip", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq", "ip_address_encoded"]].values,
     dtype=torch.float
 )
 
@@ -209,6 +221,8 @@ def import_graph_to_neo4j():
     with neo4j_conn.driver.session() as session:
         for _, row in agg_features.iterrows():
             features = row.to_dict()
+            # Use original ip_address for Neo4j, not the encoded version
+            features['ip_address'] = str(features['ip_address'])
             session.execute_write(lambda tx: neo4j_conn.create_account_node(tx, features['acc_num'], features))
         for src, dst in edges:
             session.execute_write(lambda tx: neo4j_conn.create_edge(tx, src, dst, "RELATED"))
@@ -297,7 +311,6 @@ for ring in output_rings:
 save_fraud_rings_to_neo4j(neo4j_rings)
 
 # Save to JSON
-import json
 with open("fraud_rings.json", "w") as f:
     json.dump(output_rings, f, indent=2)
 
