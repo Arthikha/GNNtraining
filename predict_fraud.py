@@ -10,37 +10,36 @@ from collections import defaultdict
 import itertools
 from neo4j import GraphDatabase
 import logging
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Define the GraphSAGE model
-class GraphSAGE(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels):
-        super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels)
-        self.conv2 = SAGEConv(hidden_channels, out_channels)
-        self.dropout = torch.nn.Dropout(0.3)
-
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = self.dropout(x)
-        x = self.conv2(x, edge_index)
-        return x
 
 # Neo4j connection class
 class Neo4jConnection:
-    def __init__(self):
+    def __init__(self, max_retries=10, initial_delay=1):
         self.uri = os.getenv('NEO4J_URI', 'bolt://neo4j:7687')
         self.user = os.getenv('NEO4J_USER', 'neo4j')
         self.password = os.getenv('NEO4J_PASSWORD', 'testpassword')
-        try:
-            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
-            self.connected = True
-            logging.info("Connected to Neo4j database.")
-        except Exception as e:
-            logging.error(f"Neo4j connection failed: {e}")
+        self.connected = False
+        self.driver = None
+        # Retry connection
+        for attempt in range(max_retries):
+            try:
+                self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+                # Verify connection with a simple query
+                with self.driver.session() as session:
+                    session.run("RETURN 1")
+                self.connected = True
+                logging.info("Connected to Neo4j database.")
+                break
+            except Exception as e:
+                delay = initial_delay * (2 ** attempt)
+                logging.warning(f"Neo4j connection attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+        else:
+            logging.error("Failed to connect to Neo4j after maximum retries.")
             self.connected = False
 
     def close(self):
@@ -85,6 +84,23 @@ class Neo4jConnection:
             tx.run(query, ring_id=ring_id, accounts=accounts)
         except Exception as e:
             logging.error(f"Failed to create fraud ring {ring_id}: {e}")
+
+
+# Define the GraphSAGE model
+class GraphSAGE(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels):
+        super().__init__()
+        self.conv1 = SAGEConv(in_channels, hidden_channels)
+        self.conv2 = SAGEConv(hidden_channels, out_channels)
+        self.dropout = torch.nn.Dropout(0.3)
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.conv2(x, edge_index)
+        return x
+    
 
 # Function to process transactions and predict fraud rings
 def process_and_predict(transactions):
