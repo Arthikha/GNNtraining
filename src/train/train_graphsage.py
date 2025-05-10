@@ -10,7 +10,7 @@ from collections import defaultdict
 import itertools
 import numpy as np
 from neo4j import GraphDatabase
-import uuid
+# import uuid
 import json
 
 # Set random seed
@@ -130,79 +130,48 @@ x = torch.tensor(
 )
 
 # Build edges
-edges = set()
-zip_groups = data_df.groupby("zip")["node_index"].apply(list)
-ip_groups = data_df.groupby("ip_address")["node_index"].apply(list)
+def build_edges(data_df, acc_to_idx):
+    edges = set()
 
-# def add_ip_edges():
-#     for ip, nodes in ip_groups.items():
-#         if len(nodes) > 1:
-#             trans_counts = data_df[data_df["ip_address"] == ip].groupby("node_index")["trans_num"].count()
-#             nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
-#             for src, dst in itertools.combinations(nodes, 2):
-#                 edges.add((src, dst))
-#                 edges.add((dst, src))
 
-# def add_zip_edges():
-#     for zip_code, nodes in zip_groups.items():
-#         if len(nodes) > 1:
-#             trans_counts = data_df[data_df["zip"] == zip_code].groupby("node_index")["trans_num"].count()
-#             nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
-#             for src, dst in itertools.combinations(nodes, 2):
-#                 edges.add((src, dst))
-#                 edges.add((dst, src))
-
-def add_zip_and_ip_edges():
-        # Add IP-based edges
-        for ip, nodes in ip_groups.items():
+    def add_zip_ip_edges():
+        combined_groups = data_df.groupby(["zip", "ip_address"])["node_index"].apply(list)
+        for (zip_code, ip), nodes in combined_groups.items():
             if len(nodes) > 1:
-                trans_counts = data_df[data_df["ip_address"] == ip].groupby("node_index")["trans_num"].count()
-                nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
-                for src, dst in itertools.combinations(nodes, 2):
+                group_df = data_df[(data_df["zip"] == zip_code) & (data_df["ip_address"] == ip)]
+                trans_counts = group_df.groupby("node_index")["trans_num"].count()
+                filtered_nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
+                for src, dst in itertools.combinations(filtered_nodes, 2):
                     edges.add((src, dst))
                     edges.add((dst, src))
 
-        # Add ZIP-based edges with stricter condition
-        for zip_code, nodes in zip_groups.items():
-            if len(nodes) > 1:
-                trans_counts = data_df[data_df["zip"] == zip_code].groupby("node_index")["trans_num"].count()
-                nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
-                # Only add ZIP edges if nodes also share an IP or state
-                for src, dst in itertools.combinations(nodes, 2):
-                    src_acc = idx_to_acc[src]
-                    dst_acc = idx_to_acc[dst]
-                    src_ip = data_df[data_df["acc_num"] == src_acc]["ip_address"].iloc[0]
-                    dst_ip = data_df[data_df["acc_num"] == dst_acc]["ip_address"].iloc[0]
-                    src_state = data_df[data_df["acc_num"] == src_acc]["state"].iloc[0]
-                    dst_state = data_df[data_df["acc_num"] == dst_acc]["state"].iloc[0]
-                    if src_ip == dst_ip or src_state == dst_state:
-                        edges.add((src, dst))
-                        edges.add((dst, src))
+    def add_transaction_edges():
+        data_df_sorted = data_df.sort_values("unix_time")
+        for ip, group in data_df_sorted.groupby("ip_address"):
+            times = group["unix_time"].values
+            nodes = group["node_index"].values
+            for i in range(len(times) - 1):
+                if times[i + 1] - times[i] < 900:
+                    src, dst = nodes[i], nodes[i + 1]
+                    edges.add((src, dst))
+                    edges.add((dst, src))
 
-def add_transaction_edges():
-    data_df_sorted = data_df.sort_values("unix_time")
-    for ip, group in data_df_sorted.groupby("ip_address"):
-        times = group["unix_time"].values
-        nodes = group["node_index"].values
-        for i in range(len(times) - 1):
-            if times[i + 1] - times[i] < 900:  # 15 minutes
-                src, dst = nodes[i], nodes[i + 1]
-                edges.add((src, dst))
-                edges.add((dst, src))
+    add_zip_ip_edges()
+    add_transaction_edges()
 
-# add_ip_edges()
-# add_zip_edges()
-add_zip_and_ip_edges()
-add_transaction_edges()
+    return list(edges)
 
-edge_index = torch.tensor(list(edges), dtype=torch.long).T
+edges = build_edges(data_df, acc_to_idx)
+edge_index = torch.tensor(edges, dtype=torch.long).T
+
 
 # Encode labels
 account_labels = data_df.groupby("acc_num")["fraud_ring_id"].first().reset_index()
-account_labels["fraud_ring_id"] = account_labels["fraud_ring_id"].fillna(0)
+account_labels["fraud_ring_id"] = account_labels["fraud_ring_id"].fillna(0).astype(str)
 label_encoder = LabelEncoder()
 account_labels["fraud_ring_id"] = label_encoder.fit_transform(account_labels["fraud_ring_id"])
 y = torch.tensor(account_labels["fraud_ring_id"].values, dtype=torch.long)
+
 
 # Compute class weights
 class_counts = np.bincount(y.numpy())
