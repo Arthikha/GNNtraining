@@ -108,9 +108,6 @@ agg_features.columns = [
 agg_features = agg_features.merge(ip_trans_freq, on="acc_num", how="left")
 agg_features["ip_trans_freq"] = agg_features["ip_trans_freq"].fillna(0)
 
-# Fill NaN in amt_std
-agg_features["amt_std"] = agg_features["amt_std"].fillna(0)
-
 # Create a column for encoded ip_address for model input
 agg_features["ip_address_encoded"] = agg_features["ip_address"].astype("category").cat.codes
 
