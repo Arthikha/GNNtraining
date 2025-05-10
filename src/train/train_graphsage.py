@@ -131,8 +131,8 @@ x = torch.tensor(
 
 # Build edges
 edges = set()
-# zip_groups = data_df.groupby("zip")["node_index"].apply(list)
-# ip_groups = data_df.groupby("ip_address")["node_index"].apply(list)
+zip_groups = data_df.groupby("zip")["node_index"].apply(list)
+ip_groups = data_df.groupby("ip_address")["node_index"].apply(list)
 
 # def add_ip_edges():
 #     for ip, nodes in ip_groups.items():
