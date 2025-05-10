@@ -10,7 +10,7 @@ from collections import defaultdict
 import itertools
 import numpy as np
 from neo4j import GraphDatabase
-# import uuid
+import uuid
 import json
 
 # Set random seed
@@ -19,15 +19,13 @@ np.random.seed(42)
 
 # Neo4j connection
 class Neo4jConnection:
-    def __init__(self):
-        self.uri = os.getenv('NEO4J_URI', 'bolt://neo4j:7687')
-        self.user =os.getenv('NEO4J_USER', 'neo4j')
-        self.password = os.getenv('NEO4J_PASSWORD', 'testpassword')
+    def __init__(self, uri="bolt://neo4j:7687", user="neo4j", password="testpassword"):
         try:
-            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+            self.driver = GraphDatabase.driver(uri, auth=(user, password))
             self.connected = True
         except Exception as e:
             print(f"Neo4j connection failed: {e}")
+            print("Proceeding without Neo4j. Verify NEO4J_AUTH=neo4j/testpassword in docker-compose.yml.")
             self.connected = False
 
     def close(self):
@@ -42,13 +40,13 @@ class Neo4jConnection:
 
     def create_account_node(self, tx, acc_num, features):
         query = (
-            "CREATE (a:Account {acc_num: $acc_num, "
+            "CREATE (a:Account {acc_num: $acc_num, amt_mean: $amt_mean, amt_std: $amt_std, "
             "trans_count: $trans_count, state: $state, zip: $zip, city_pop: $city_pop, "
             "unix_time_mean: $unix_time_mean, time_span: $time_span, ip_trans_freq: $ip_trans_freq, "
             "ip_address: $ip_address})"
         )
         # Ensure trans_count is an integer and non-negative
-        # features['trans_count'] = int(max(features['trans_count'], 0))
+        features['trans_count'] = int(max(features['trans_count'], 0))
         # Ensure ip_address is a string
         features['ip_address'] = str(features['ip_address'])
         tx.run(query, **features)
@@ -75,7 +73,7 @@ class Neo4jConnection:
 neo4j_conn = Neo4jConnection()
 
 # Load dataset
-dataset_path = os.path.join(os.path.dirname(__file__), '../../dataset/fraud_with_rings_2.csv')
+dataset_path = os.path.join(os.path.dirname(__file__), '../../dataset/fraud_with_rings_3.csv')
 data_df = pd.read_csv(dataset_path)
 
 # Map accounts to node indices
@@ -90,7 +88,8 @@ ip_trans_freq = ip_trans_freq.groupby("acc_num")["trans_num"].sum().reset_index(
 ip_trans_freq.columns = ["acc_num", "ip_trans_freq"]
 
 agg_features = data_df.groupby("acc_num").agg({
-    "trans_num": "count",
+    "amt": ["mean", "std"],
+    "trans_num": "count",  # Use trans_num for count to ensure integer
     "state": lambda x: x.mode().iloc[0] if not x.mode().empty else "Unknown",
     "zip": "first",
     "city_pop": "mean",
@@ -100,13 +99,16 @@ agg_features = data_df.groupby("acc_num").agg({
 
 # Flatten column names
 agg_features.columns = [
-    "acc_num", "trans_count", "state", "zip",
+    "acc_num", "amt_mean", "amt_std", "trans_count", "state", "zip",
     "city_pop", "unix_time_mean", "time_span", "ip_address"
 ]
 
 # Merge ip_trans_freq
 agg_features = agg_features.merge(ip_trans_freq, on="acc_num", how="left")
 agg_features["ip_trans_freq"] = agg_features["ip_trans_freq"].fillna(0)
+
+# Fill NaN in amt_std
+agg_features["amt_std"] = agg_features["amt_std"].fillna(0)
 
 # Create a column for encoded ip_address for model input
 agg_features["ip_address_encoded"] = agg_features["ip_address"].astype("category").cat.codes
@@ -116,63 +118,65 @@ agg_features["state"] = agg_features["state"].astype("category").cat.codes
 
 # Normalize numerical features (exclude trans_count to keep it integer)
 scaler = StandardScaler()
-numerical_cols = ["city_pop", "unix_time_mean", "time_span", "ip_trans_freq"]
+numerical_cols = ["amt_mean", "amt_std", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq"]
 agg_features[numerical_cols] = scaler.fit_transform(agg_features[numerical_cols])
 
 # Ensure trans_count is integer and non-negative
 agg_features["trans_count"] = agg_features["trans_count"].astype(int)
-# agg_features["trans_count"] = agg_features["trans_count"].clip(lower=0)
+agg_features["trans_count"] = agg_features["trans_count"].clip(lower=0)
 
 # Node feature matrix (use encoded ip_address)
 x = torch.tensor(
-    agg_features[["trans_count", "state", "zip", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq", "ip_address_encoded"]].values,
+    agg_features[["amt_mean", "amt_std", "trans_count", "state", "zip", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq", "ip_address_encoded"]].values,
     dtype=torch.float
 )
 
 # Build edges
-def build_edges(data_df, acc_to_idx):
-    edges = set()
+edges = set()
+zip_groups = data_df.groupby("zip")["node_index"].apply(list)
+ip_groups = data_df.groupby("ip_address")["node_index"].apply(list)
 
+def add_ip_edges():
+    for ip, nodes in ip_groups.items():
+        if len(nodes) > 1:
+            trans_counts = data_df[data_df["ip_address"] == ip].groupby("node_index")["trans_num"].count()
+            nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
+            for src, dst in itertools.combinations(nodes, 2):
+                edges.add((src, dst))
+                edges.add((dst, src))
 
-    def add_zip_ip_edges():
-        combined_groups = data_df.groupby(["zip", "ip_address"])["node_index"].apply(list)
-        for (zip_code, ip), nodes in combined_groups.items():
-            if len(nodes) > 1:
-                group_df = data_df[(data_df["zip"] == zip_code) & (data_df["ip_address"] == ip)]
-                trans_counts = group_df.groupby("node_index")["trans_num"].count()
-                filtered_nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
-                for src, dst in itertools.combinations(filtered_nodes, 2):
-                    edges.add((src, dst))
-                    edges.add((dst, src))
+def add_zip_edges():
+    for zip_code, nodes in zip_groups.items():
+        if len(nodes) > 1:
+            trans_counts = data_df[data_df["zip"] == zip_code].groupby("node_index")["trans_num"].count()
+            nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
+            for src, dst in itertools.combinations(nodes, 2):
+                edges.add((src, dst))
+                edges.add((dst, src))
 
-    def add_transaction_edges():
-        data_df_sorted = data_df.sort_values("unix_time")
-        for ip, group in data_df_sorted.groupby("ip_address"):
-            times = group["unix_time"].values
-            nodes = group["node_index"].values
-            for i in range(len(times) - 1):
-                if times[i + 1] - times[i] < 900:
-                    src, dst = nodes[i], nodes[i + 1]
-                    edges.add((src, dst))
-                    edges.add((dst, src))
+def add_transaction_edges():
+    data_df_sorted = data_df.sort_values("unix_time")
+    for ip, group in data_df_sorted.groupby("ip_address"):
+        times = group["unix_time"].values
+        nodes = group["node_index"].values
+        for i in range(len(times) - 1):
+            if times[i + 1] - times[i] < 900:  # 15 minutes
+                src, dst = nodes[i], nodes[i + 1]
+                edges.add((src, dst))
+                edges.add((dst, src))
 
-    add_zip_ip_edges()
-    add_transaction_edges()
+add_ip_edges()
+add_zip_edges()
+add_transaction_edges()
 
-    return list(edges)
-
-edges = build_edges(data_df, acc_to_idx)
-edge_index = torch.tensor(edges, dtype=torch.long).T
-
+edge_index = torch.tensor(list(edges), dtype=torch.long).T
 
 # Encode labels
 account_labels = data_df.groupby("acc_num")["fraud_ring_id"].first().reset_index()
-# Convert fraud_ring_id to integers, handling floats and NaN
-account_labels["fraud_ring_id"] = pd.to_numeric(account_labels["fraud_ring_id"], errors='coerce').fillna(0).astype(int)
+account_labels["fraud_ring_id"] = account_labels["fraud_ring_id"].fillna(0)
 label_encoder = LabelEncoder()
 account_labels["fraud_ring_id"] = label_encoder.fit_transform(account_labels["fraud_ring_id"])
 y = torch.tensor(account_labels["fraud_ring_id"].values, dtype=torch.long)
-
 
 # Compute class weights
 class_counts = np.bincount(y.numpy())
@@ -243,12 +247,12 @@ model_path = "best_model.pt"
 
 for epoch in range(1, 201):
     loss = train()
-    if loss < best_loss:
-        best_loss = loss
-        epochs_without_improvement = 0
-        torch.save(model.state_dict(), model_path)
-    else:
-        epochs_without_improvement += 1
+    # if loss < best_loss:
+    best_loss = loss
+    epochs_without_improvement = 0
+    torch.save(model.state_dict(), model_path)
+    # else:
+    #     epochs_without_improvement += 1
     if epochs_without_improvement >= patience:
         break
 
