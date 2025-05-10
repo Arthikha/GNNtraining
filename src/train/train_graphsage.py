@@ -167,7 +167,8 @@ edge_index = torch.tensor(edges, dtype=torch.long).T
 
 # Encode labels
 account_labels = data_df.groupby("acc_num")["fraud_ring_id"].first().reset_index()
-account_labels["fraud_ring_id"] = account_labels["fraud_ring_id"].fillna(0).astype(str)
+# Convert fraud_ring_id to integers, handling floats and NaN
+account_labels["fraud_ring_id"] = pd.to_numeric(account_labels["fraud_ring_id"], errors='coerce').fillna(0).astype(int)
 label_encoder = LabelEncoder()
 account_labels["fraud_ring_id"] = label_encoder.fit_transform(account_labels["fraud_ring_id"])
 y = torch.tensor(account_labels["fraud_ring_id"].values, dtype=torch.long)
