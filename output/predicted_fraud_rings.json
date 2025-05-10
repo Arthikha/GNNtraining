@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "fraud_ring_id": 1,
+    "accounts": [
+      "acc123",
+      "acc456",
+      "acc999"
+    ]
+  },
+  {
+    "fraud_ring_id": 2,
+    "accounts": [
+      "acc101",
+      "acc789"
+    ]
+  }
+]
