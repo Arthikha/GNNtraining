@@ -73,7 +73,7 @@ class Neo4jConnection:
 neo4j_conn = Neo4jConnection()
 
 # Load dataset
-dataset_path = os.path.join(os.path.dirname(__file__), '../../dataset/fraud_with_rings_2.csv')
+dataset_path = os.path.join(os.path.dirname(__file__), '../../dataset/fraud_with_rings_3.csv')
 data_df = pd.read_csv(dataset_path)
 
 # Map accounts to node indices
@@ -247,12 +247,12 @@ model_path = "best_model.pt"
 
 for epoch in range(1, 201):
     loss = train()
-    if loss < best_loss:
-        best_loss = loss
-        epochs_without_improvement = 0
-        torch.save(model.state_dict(), model_path)
-    else:
-        epochs_without_improvement += 1
+    # if loss < best_loss:
+    best_loss = loss
+    epochs_without_improvement = 0
+    torch.save(model.state_dict(), model_path)
+    # else:
+    #     epochs_without_improvement += 1
     if epochs_without_improvement >= patience:
         break
 
