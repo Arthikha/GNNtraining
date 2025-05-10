@@ -19,13 +19,15 @@ np.random.seed(42)
 
 # Neo4j connection
 class Neo4jConnection:
-    def __init__(self, uri="bolt://neo4j:7687", user="neo4j", password="testpassword"):
+    def __init__(self):
+        self.uri = os.getenv('NEO4J_URI', 'bolt://neo4j:7687')
+        self.user =os.getenv('NEO4J_USER', 'neo4j')
+        self.password = os.getenv('NEO4J_PASSWORD', 'testpassword')
         try:
-            self.driver = GraphDatabase.driver(uri, auth=(user, password))
+            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
             self.connected = True
         except Exception as e:
             print(f"Neo4j connection failed: {e}")
-            print("Proceeding without Neo4j. Verify NEO4J_AUTH=neo4j/testpassword in docker-compose.yml.")
             self.connected = False
 
     def close(self):
@@ -40,13 +42,13 @@ class Neo4jConnection:
 
     def create_account_node(self, tx, acc_num, features):
         query = (
-            "CREATE (a:Account {acc_num: $acc_num, amt_mean: $amt_mean, amt_std: $amt_std, "
+            "CREATE (a:Account {acc_num: $acc_num, "
             "trans_count: $trans_count, state: $state, zip: $zip, city_pop: $city_pop, "
             "unix_time_mean: $unix_time_mean, time_span: $time_span, ip_trans_freq: $ip_trans_freq, "
             "ip_address: $ip_address})"
         )
         # Ensure trans_count is an integer and non-negative
-        features['trans_count'] = int(max(features['trans_count'], 0))
+        # features['trans_count'] = int(max(features['trans_count'], 0))
         # Ensure ip_address is a string
         features['ip_address'] = str(features['ip_address'])
         tx.run(query, **features)
@@ -88,8 +90,7 @@ ip_trans_freq = ip_trans_freq.groupby("acc_num")["trans_num"].sum().reset_index(
 ip_trans_freq.columns = ["acc_num", "ip_trans_freq"]
 
 agg_features = data_df.groupby("acc_num").agg({
-    "amt": ["mean", "std"],
-    "trans_num": "count",  # Use trans_num for count to ensure integer
+    "trans_num": "count",
     "state": lambda x: x.mode().iloc[0] if not x.mode().empty else "Unknown",
     "zip": "first",
     "city_pop": "mean",
@@ -99,7 +100,7 @@ agg_features = data_df.groupby("acc_num").agg({
 
 # Flatten column names
 agg_features.columns = [
-    "acc_num", "amt_mean", "amt_std", "trans_count", "state", "zip",
+    "acc_num", "trans_count", "state", "zip",
     "city_pop", "unix_time_mean", "time_span", "ip_address"
 ]
 
@@ -118,41 +119,68 @@ agg_features["state"] = agg_features["state"].astype("category").cat.codes
 
 # Normalize numerical features (exclude trans_count to keep it integer)
 scaler = StandardScaler()
-numerical_cols = ["amt_mean", "amt_std", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq"]
+numerical_cols = ["city_pop", "unix_time_mean", "time_span", "ip_trans_freq"]
 agg_features[numerical_cols] = scaler.fit_transform(agg_features[numerical_cols])
 
 # Ensure trans_count is integer and non-negative
 agg_features["trans_count"] = agg_features["trans_count"].astype(int)
-agg_features["trans_count"] = agg_features["trans_count"].clip(lower=0)
+# agg_features["trans_count"] = agg_features["trans_count"].clip(lower=0)
 
 # Node feature matrix (use encoded ip_address)
 x = torch.tensor(
-    agg_features[["amt_mean", "amt_std", "trans_count", "state", "zip", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq", "ip_address_encoded"]].values,
+    agg_features[["trans_count", "state", "zip", "city_pop", "unix_time_mean", "time_span", "ip_trans_freq", "ip_address_encoded"]].values,
     dtype=torch.float
 )
 
 # Build edges
 edges = set()
-zip_groups = data_df.groupby("zip")["node_index"].apply(list)
-ip_groups = data_df.groupby("ip_address")["node_index"].apply(list)
+# zip_groups = data_df.groupby("zip")["node_index"].apply(list)
+# ip_groups = data_df.groupby("ip_address")["node_index"].apply(list)
 
-def add_ip_edges():
-    for ip, nodes in ip_groups.items():
-        if len(nodes) > 1:
-            trans_counts = data_df[data_df["ip_address"] == ip].groupby("node_index")["trans_num"].count()
-            nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
-            for src, dst in itertools.combinations(nodes, 2):
-                edges.add((src, dst))
-                edges.add((dst, src))
+# def add_ip_edges():
+#     for ip, nodes in ip_groups.items():
+#         if len(nodes) > 1:
+#             trans_counts = data_df[data_df["ip_address"] == ip].groupby("node_index")["trans_num"].count()
+#             nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
+#             for src, dst in itertools.combinations(nodes, 2):
+#                 edges.add((src, dst))
+#                 edges.add((dst, src))
 
-def add_zip_edges():
-    for zip_code, nodes in zip_groups.items():
-        if len(nodes) > 1:
-            trans_counts = data_df[data_df["zip"] == zip_code].groupby("node_index")["trans_num"].count()
-            nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
-            for src, dst in itertools.combinations(nodes, 2):
-                edges.add((src, dst))
-                edges.add((dst, src))
+# def add_zip_edges():
+#     for zip_code, nodes in zip_groups.items():
+#         if len(nodes) > 1:
+#             trans_counts = data_df[data_df["zip"] == zip_code].groupby("node_index")["trans_num"].count()
+#             nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
+#             for src, dst in itertools.combinations(nodes, 2):
+#                 edges.add((src, dst))
+#                 edges.add((dst, src))
+
+def add_zip_and_ip_edges():
+        # Add IP-based edges
+        for ip, nodes in ip_groups.items():
+            if len(nodes) > 1:
+                trans_counts = data_df[data_df["ip_address"] == ip].groupby("node_index")["trans_num"].count()
+                nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
+                for src, dst in itertools.combinations(nodes, 2):
+                    edges.add((src, dst))
+                    edges.add((dst, src))
+
+        # Add ZIP-based edges with stricter condition
+        for zip_code, nodes in zip_groups.items():
+            if len(nodes) > 1:
+                trans_counts = data_df[data_df["zip"] == zip_code].groupby("node_index")["trans_num"].count()
+                nodes = [n for n in nodes if trans_counts.get(n, 0) >= 1]
+                # Only add ZIP edges if nodes also share an IP or state
+                for src, dst in itertools.combinations(nodes, 2):
+                    src_acc = idx_to_acc[src]
+                    dst_acc = idx_to_acc[dst]
+                    src_ip = data_df[data_df["acc_num"] == src_acc]["ip_address"].iloc[0]
+                    dst_ip = data_df[data_df["acc_num"] == dst_acc]["ip_address"].iloc[0]
+                    src_state = data_df[data_df["acc_num"] == src_acc]["state"].iloc[0]
+                    dst_state = data_df[data_df["acc_num"] == dst_acc]["state"].iloc[0]
+                    if src_ip == dst_ip or src_state == dst_state:
+                        edges.add((src, dst))
+                        edges.add((dst, src))
 
 def add_transaction_edges():
     data_df_sorted = data_df.sort_values("unix_time")
@@ -165,8 +193,9 @@ def add_transaction_edges():
                 edges.add((src, dst))
                 edges.add((dst, src))
 
-add_ip_edges()
-add_zip_edges()
+# add_ip_edges()
+# add_zip_edges()
+add_zip_and_ip_edges()
 add_transaction_edges()
 
 edge_index = torch.tensor(list(edges), dtype=torch.long).T

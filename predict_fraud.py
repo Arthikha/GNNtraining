@@ -28,9 +28,12 @@ class GraphSAGE(torch.nn.Module):
 
 # Neo4j connection class
 class Neo4jConnection:
-    def __init__(self, uri="bolt://neo4j:7687", user="neo4j", password="testpassword"):
+    def __init__(self):
+        self.uri = os.getenv('NEO4J_URI', 'bolt://neo4j:7687')
+        self.user =os.getenv('NEO4J_USER', 'neo4j')
+        self.password = os.getenv('NEO4J_PASSWORD', 'testpassword')
         try:
-            self.driver = GraphDatabase.driver(uri, auth=(user, password))
+            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
             self.connected = True
         except Exception as e:
             print(f"Neo4j connection failed: {e}")
