@@ -7,7 +7,6 @@ services:
     environment:
       - NEO4J_AUTH=neo4j/testpassword
       - NEO4J_server_memory_heap_max__size=4G
-      # - NEO4J_dbms_memory_heap_max__size=4G
     ports:
       - "7474:7474"
       - "7687:7687"
@@ -27,8 +26,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # ports:
-    #   - "5000:5000"
     environment:
       - NODE_ENV=production
       - NEO4J_URI=bolt://neo4j:7687
@@ -38,7 +35,6 @@ services:
       db:
         condition: service_healthy
     volumes:
-      # - ./app:/usr/src/app
       - ./output:/app/output
     networks:
       - mynetwork
