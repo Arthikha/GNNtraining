@@ -1,0 +1,128 @@
+# train_graphsage.py
+
+import os
+import pandas as pd
+import torch
+from torch_geometric.data import Data
+from torch_geometric.nn import SAGEConv
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from collections import defaultdict
+import itertools
+
+# Load dataset
+dataset_path = os.path.join(os.path.dirname(__file__), '../../dataset/fraud_with_rings_2.csv')
+data_df = pd.read_csv(dataset_path)
+
+# Map accounts to node indices
+unique_accounts = data_df["acc_num"].unique()
+acc_to_idx = {acc: idx for idx, acc in enumerate(unique_accounts)}
+idx_to_acc = {idx: acc for acc, idx in acc_to_idx.items()}
+
+data_df["node_index"] = data_df["acc_num"].map(acc_to_idx)
+
+# Aggregate features per account
+agg_features = data_df.groupby("acc_num").agg({
+    "amt": "mean",
+    "state": lambda x: x.mode().iloc[0] if not x.mode().empty else 0,
+    "zip": "first",
+    "city_pop": "mean",
+    "unix_time": "mean",
+    "ip_address": lambda x: x.mode().iloc[0] if not x.mode().empty else 0
+}).reset_index()
+
+# Encode categorical columns
+agg_features["state"] = agg_features["state"].astype("category").cat.codes
+agg_features["ip_address"] = agg_features["ip_address"].astype("category").cat.codes
+
+# Node feature matrix
+x = torch.tensor(agg_features[["amt", "state", "zip", "city_pop", "unix_time", "ip_address"]].values, dtype=torch.float)
+
+# Build edges: connect accounts that share same zip or ip_address
+edges = set()
+zip_groups = data_df.groupby("zip")["node_index"].unique()
+ip_groups = data_df.groupby("ip_address")["node_index"].unique()
+
+def add_edges(groups):
+    for node_list in groups:
+        for src, dst in itertools.combinations(node_list, 2):
+            edges.add((src, dst))
+            edges.add((dst, src))  # Add both directions
+
+add_edges(zip_groups)
+add_edges(ip_groups)
+
+edge_index = torch.tensor(list(edges), dtype=torch.long).T  # Shape: [2, num_edges]
+
+# Encode labels
+account_labels = data_df.groupby("acc_num")["fraud_ring_id"].first().reset_index()
+account_labels["fraud_ring_id"] = account_labels["fraud_ring_id"].fillna(-1)  # Non-fraud = -1
+label_encoder = LabelEncoder()
+account_labels["fraud_ring_id"] = label_encoder.fit_transform(account_labels["fraud_ring_id"])
+y = torch.tensor(account_labels["fraud_ring_id"].values, dtype=torch.long)
+
+# Create graph data object
+data = Data(x=x, edge_index=edge_index, y=y)
+
+# Train-test split
+train_indices, test_indices = train_test_split(range(data.num_nodes), test_size=0.2, random_state=42)
+data.train_mask = torch.zeros(data.num_nodes, dtype=torch.bool)
+data.train_mask[train_indices] = True
+data.test_mask = torch.zeros(data.num_nodes, dtype=torch.bool)
+data.test_mask[test_indices] = True
+
+# Define model
+class GraphSAGE(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels):
+        super().__init__()
+        self.conv1 = SAGEConv(in_channels, hidden_channels)
+        self.conv2 = SAGEConv(hidden_channels, out_channels)
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = torch.relu(x)
+        x = self.conv2(x, edge_index)
+        return x
+
+model = GraphSAGE(data.num_features, hidden_channels=64, out_channels=y.max().item() + 1)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+criterion = torch.nn.CrossEntropyLoss()
+
+# Training loop
+def train():
+    model.train()
+    optimizer.zero_grad()
+    out = model(data.x, data.edge_index)
+    loss = criterion(out[data.train_mask], data.y[data.train_mask])
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+# Predict and extract fraud rings
+def get_fraud_rings():
+    model.eval()
+    out = model(data.x, data.edge_index)
+    pred = out.argmax(dim=1).cpu().numpy()
+
+    fraud_rings = defaultdict(list)
+    for idx, pred_label in enumerate(pred):
+        fraud_rings[pred_label].append(idx_to_acc[idx])  # map back to acc_num
+
+    # Format as list of dicts
+    formatted_output = [
+        {"fraud_ring_id": int(ring_id), "accounts": acc_list}
+        for ring_id, acc_list in fraud_rings.items()
+    ]
+    return formatted_output
+
+# Training
+for epoch in range(1, 201):
+    loss = train()
+    if epoch % 10 == 0:
+        print(f"Epoch {epoch}, Loss: {loss:.4f}")
+
+# Output fraud rings
+predicted_rings = get_fraud_rings()
+print("\nPredicted Fraud Rings:")
+for ring in predicted_rings:
+    print(ring)
