@@ -1,6 +1,15 @@
+# torch==2.2.0
+# torch-geometric==2.4.0
+# numpy==1.24.3
+# neo4j==5.12.0
+# pandas==2.1.0
+# scikit-learn==1.4.0
+
+pandas==2.2.2
+numpy==1.24.4 
+tensorflow==2.17.0 
+dgl==1.0.4
+neo4j==5.12.0
+scikit-learn==1.4.0
 torch==2.2.0
 torch-geometric==2.4.0
-numpy==1.24.3
-neo4j==5.12.0
-pandas==2.1.0
-scikit-learn==1.4.0
