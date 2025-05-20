@@ -146,27 +146,38 @@ def process_and_predict(transactions):
 
     # Build edges
     edges = set()
+    edges_accounts = set()
     zip_groups = data_df.groupby("zip")["acc_num"].apply(list)
     ip_groups = data_df.groupby("ip_address")["acc_num"].apply(list)
 
+    # Adds edges between accounts that have used the same IP address and have made at least 
+    # 2 transactions each, labeling the edge as "IP"
     def add_ip_edges():
         for ip, nodes in ip_groups.items():
             if len(nodes) > 1:
                 trans_counts = data_df[data_df["ip_address"] == ip].groupby("acc_num")["trans_num"].count()
                 filtered_nodes = [n for n in nodes if trans_counts.get(n, 0) >= 2]
                 for src, dst in itertools.combinations(filtered_nodes, 2):
-                    edges.add((acc_to_idx[src], acc_to_idx[dst]))
-                    edges.add((acc_to_idx[dst], acc_to_idx[src]))
+                    edges_accounts.add((acc_to_idx[src], acc_to_idx[dst]))
+                    edges_accounts.add((acc_to_idx[dst], acc_to_idx[src]))
+                    edges.add((acc_to_idx[src], acc_to_idx[dst], "IP"))
+                    edges.add((acc_to_idx[dst], acc_to_idx[src], "IP"))
 
+    # Adds edges between accounts that share the same ZIP code and have at least 2 
+    # transactions each, labeling the edge as "ZIP"
     def add_zip_edges():
         for zip_code, nodes in zip_groups.items():
             if len(nodes) > 1:
                 trans_counts = data_df[data_df["zip"] == zip_code].groupby("acc_num")["trans_num"].count()
                 filtered_nodes = [n for n in nodes if trans_counts.get(n, 0) >= 2]
                 for src, dst in itertools.combinations(filtered_nodes, 2):
-                    edges.add((acc_to_idx[src], acc_to_idx[dst]))
-                    edges.add((acc_to_idx[dst], acc_to_idx[src]))
+                    edges_accounts.add((acc_to_idx[src], acc_to_idx[dst]))
+                    edges_accounts.add((acc_to_idx[dst], acc_to_idx[src]))
+                    edges.add((acc_to_idx[src], acc_to_idx[dst], "ZIP"))
+                    edges.add((acc_to_idx[dst], acc_to_idx[src], "ZIP"))
 
+    # Adds edges between accounts that made transactions from the same IP address within 
+    # 5 minutes of each other, labeling the edge as "TIME"
     def add_transaction_edges():
         data_df_sorted = data_df.sort_values("unix_time")
         for ip, group in data_df_sorted.groupby("ip_address"):
@@ -175,15 +186,17 @@ def process_and_predict(transactions):
             for i in range(len(times) - 1):
                 if times[i + 1] - times[i] < 300:
                     src, dst = nodes[i], nodes[i + 1]
-                    edges.add((acc_to_idx[src], acc_to_idx[dst]))
-                    edges.add((acc_to_idx[dst], acc_to_idx[src]))
+                    edges_accounts.add((acc_to_idx[src], acc_to_idx[dst]))
+                    edges_accounts.add((acc_to_idx[dst], acc_to_idx[src]))
+                    edges.add((acc_to_idx[src], acc_to_idx[dst], "TIME"))
+                    edges.add((acc_to_idx[dst], acc_to_idx[src], "TIME"))
 
     add_ip_edges()
     add_zip_edges()
     add_transaction_edges()
 
     # Convert edges to tensor
-    edge_index = torch.tensor(list(edges), dtype=torch.long).T
+    edge_index = torch.tensor(list(edges_accounts), dtype=torch.long).T
 
     # Create graph data object
     data = Data(x=x, edge_index=edge_index)
@@ -263,12 +276,12 @@ def process_and_predict(transactions):
                     acc_num=row['acc_num'],
                     features=row.to_dict()
                 )
-            for src_idx, dst_idx in edges:
+            for src_idx, dst_idx, edge_type in edges:
                 session.execute_write(
                     neo4j_conn.create_edge,
                     src_acc=idx_to_acc[src_idx],
                     dst_acc=idx_to_acc[dst_idx],
-                    edge_type='RELATED'
+                    edge_type=edge_type
                 )
             for ring in neo4j_rings:
                 session.execute_write(
@@ -301,9 +314,9 @@ if __name__ == "__main__":
         {'acc_num': 'acc999', 'amt': 8000.0, 'state': 'NY', 'zip': '10001', 'city_pop': 1000000, 'trans_num': 't6', 'unix_time': 1625097605, 'ip_address': '192.168.1.1'},
         {'acc_num': 'acc789', 'amt': 10000.0, 'state': 'CA', 'zip': '90001', 'city_pop': 500000, 'trans_num': 't7', 'unix_time': 1625097700, 'ip_address': '192.168.1.2'},
         {'acc_num': 'acc789', 'amt': 12000.0, 'state': 'CA', 'zip': '90001', 'city_pop': 500000, 'trans_num': 't8', 'unix_time': 1625097701, 'ip_address': '192.168.1.2'},
-        {'acc_num': 'acc101', 'amt': 11000.0, 'state': 'CA', 'zip': '90001', 'city_pop': 500000, 'trans_num': 't9', 'unix_time': 1625097702, 'ip_address': '192.168.1.2'},
-        {'acc_num': 'acc102', 'amt': 100.0, 'state': 'TX', 'zip': '73301', 'city_pop': 200000, 'trans_num': 't10', 'unix_time': 1625097800, 'ip_address': '192.168.1.3'},
-        {'acc_num': 'acc102', 'amt': 150.0, 'state': 'TX', 'zip': '73301', 'city_pop': 200000, 'trans_num': 't11', 'unix_time': 1625097900, 'ip_address': '192.168.1.3'},
+        {'acc_num': 'acc102', 'amt': 100.0, 'state': 'TX', 'zip': '73301', 'city_pop': 200000, 'trans_num': 't9', 'unix_time': 1625097800, 'ip_address': '192.168.1.3'},
+        {'acc_num': 'acc102', 'amt': 150.0, 'state': 'TX', 'zip': '73301', 'city_pop': 200000, 'trans_num': 't10', 'unix_time': 1625097900, 'ip_address': '192.168.1.3'},
+        {'acc_num': 'acc101', 'amt': 11000.0, 'state': 'CA', 'zip': '90001', 'city_pop': 500000, 'trans_num': 't11', 'unix_time': 1625097702, 'ip_address': '192.168.1.2'},
     ]
 
     predicted_rings = process_and_predict(transactions)
